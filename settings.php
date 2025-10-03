@@ -1,287 +1,350 @@
 <?php
-require_once '../config/settings.php';
-require_once '../includes/functions.php';
-check_admin();
+// config/settings.php - Updated for Kerala Fest Pratibimb with new features
 
-// Handle form submission
-if ($_SERVER['REQUEST_METHOD'] == 'POST') {
-    foreach ($_POST as $key => $value) {
-        if ($key != 'submit') {
-            $key = mysqli_real_escape_string($conn, $key);
-            $value = mysqli_real_escape_string($conn, $value);
-            
-            $sql = "INSERT INTO settings (setting_key, setting_value) 
-                    VALUES ('$key', '$value') 
-                    ON DUPLICATE KEY UPDATE setting_value = '$value'";
-            mysqli_query($conn, $sql);
+require_once 'database.php';
+
+// Set timezone to Indian
+date_default_timezone_set('Asia/Kolkata');
+
+// TESTING MODE - Set to true for testing, false for production
+define('TEST_MODE', true);
+
+// Get settings from database
+$settings_array = array();
+$settings_query = "SELECT setting_key, setting_value FROM settings";
+$settings_result = mysqli_query($conn, $settings_query);
+
+if ($settings_result && mysqli_num_rows($settings_result) > 0) {
+    while($row = mysqli_fetch_assoc($settings_result)) {
+        $settings_array[$row['setting_key']] = $row['setting_value'];
+    }
+}
+
+// Core settings
+define('SITE_URL', rtrim($settings_array['site_url'] ?? 'https://keralafest.in', '/'));
+define('EVENT_NAME', $settings_array['event_name'] ?? 'Kerala Fest Pratibimb');
+
+// Event configuration
+define('EVENT_DATE', $settings_array['event_date'] ?? '13-16 November 2025');
+define('EVENT_TIME', $settings_array['event_time'] ?? '9:00 AM - 10:00 PM');
+define('EVENT_VENUE', $settings_array['event_venue'] ?? 'Bittan Market Ground, Bhopal');
+define('EVENT_PREFIX', $settings_array['event_prefix'] ?? 'KERF');
+
+// Event dates array (NEW - from JSON in database)
+$event_dates_json = $settings_array['event_dates'] ?? '["2025-11-13","2025-11-14","2025-11-15","2025-11-16"]';
+define('EVENT_DATES_JSON', $event_dates_json);
+define('EVENT_DATES', json_decode($event_dates_json, true) ?: []);
+
+// Pricing (NEW - from database settings)
+$price_per_day = $settings_array['price_per_day'] ?? $settings_array['ticket_price'] ?? '20';
+define('PRICE_PER_DAY', (float)$price_per_day);
+define('TICKET_PRICE', PRICE_PER_DAY); // For backward compatibility
+
+// Payment Gateway
+if (TEST_MODE) {
+    define('PHONEPE_MODE', 'UAT');
+    define('PHONEPE_MERCHANT_ID', 'PGTESTPAYUAT86');
+    define('PHONEPE_SALT_KEY', '96434309-7796-489d-8924-ab56988a6076');
+    define('PHONEPE_SALT_INDEX', 1);
+    define('PHONEPE_HOST_URL', 'https://api-preprod.phonepe.com/apis/pg-sandbox');
+} else {
+    define('PHONEPE_MODE', 'PRODUCTION');
+    define('PHONEPE_MERCHANT_ID', $settings_array['phonepe_merchant_id'] ?? '');
+    define('PHONEPE_SALT_KEY', $settings_array['phonepe_salt_key'] ?? '');
+    define('PHONEPE_SALT_INDEX', (int)($settings_array['phonepe_salt_index'] ?? 1));
+    define('PHONEPE_HOST_URL', 'https://api.phonepe.com/apis/hermes');
+}
+
+// Payment URLs
+define('PAYMENT_CALLBACK_URL', SITE_URL . '/api/payment_callback.php');
+define('PAYMENT_WEBHOOK_URL', SITE_URL . '/api/payment_webhook.php');
+define('PAYMENT_REDIRECT_URL', SITE_URL . '/thank-you.php');
+
+// Email Configuration
+define('SMTP_HOST', $settings_array['smtp_host'] ?? 'smtp.gmail.com');
+define('SMTP_PORT', (int)($settings_array['smtp_port'] ?? 587));
+define('SMTP_USERNAME', $settings_array['smtp_username'] ?? '');
+define('SMTP_PASSWORD', $settings_array['smtp_password'] ?? '');
+define('SMTP_FROM_EMAIL', $settings_array['smtp_from_email'] ?? 'noreply@keralafest.in');
+define('SMTP_FROM_NAME', $settings_array['smtp_from_name'] ?? EVENT_NAME);
+define('SMTP_ENCRYPTION', $settings_array['smtp_encryption'] ?? 'tls');
+
+// QR Code Settings
+define('QR_CODE_SIZE', (int)($settings_array['qr_code_size'] ?? 300));
+
+// Upload Configuration
+define('UPLOAD_DIR', dirname(__DIR__) . '/uploads/');
+define('SLIDER_UPLOAD_DIR', UPLOAD_DIR . 'sliders/');
+define('LOGO_UPLOAD_DIR', UPLOAD_DIR . 'logos/');
+
+// File size limits (bytes)
+define('MAX_IMAGE_SIZE', 5 * 1024 * 1024); // 5MB
+define('MAX_VIDEO_SIZE', 50 * 1024 * 1024); // 50MB
+
+// Allowed file types
+define('ALLOWED_IMAGE_TYPES', ['jpg', 'jpeg', 'png', 'gif', 'webp']);
+define('ALLOWED_VIDEO_TYPES', ['mp4', 'webm', 'ogg']);
+
+// Test configuration
+if (TEST_MODE) {
+    error_reporting(E_ALL);
+    ini_set('display_errors', 1);
+    define('SKIP_PAYMENT', false);
+    define('SKIP_EMAIL', true);
+    define('AUTO_FILL_FORMS', true);
+} else {
+    error_reporting(E_ALL);
+    ini_set('display_errors', 0);
+    define('SKIP_PAYMENT', false);
+    define('SKIP_EMAIL', false);
+    define('AUTO_FILL_FORMS', false);
+}
+
+// ============================================
+// Helper Functions
+// ============================================
+
+/**
+ * Calculate total amount based on dates and attendees
+ * Formula: (Number of People) × (Number of Days) × (Price Per Day)
+ */
+function calculateTotalAmount($selected_dates, $additional_attendees = 0) {
+    $total_people = 1 + (int)$additional_attendees;
+    $total_days = is_array($selected_dates) ? count($selected_dates) : (int)$selected_dates;
+    
+    if ($total_days < 1) $total_days = 1;
+    
+    return $total_people * $total_days * PRICE_PER_DAY;
+}
+
+/**
+ * Generate unique registration ID
+ */
+function generateRegistrationId($conn) {
+    $date = date('Y-m-d');
+    $query = "SELECT COUNT(*) as count FROM registrations WHERE DATE(registration_date) = '$date'";
+    $result = mysqli_query($conn, $query);
+    $row = mysqli_fetch_assoc($result);
+    $count = $row['count'] + 1;
+    
+    return 'REG' . date('Ymd') . str_pad($count, 4, '0', STR_PAD_LEFT);
+}
+
+/**
+ * Generate unique attendee ID
+ */
+function generateAttendeeId($conn) {
+    $query = "SELECT COUNT(*) as count FROM attendees";
+    $result = mysqli_query($conn, $query);
+    $row = mysqli_fetch_assoc($result);
+    $count = $row['count'] + 1;
+    
+    return EVENT_PREFIX . str_pad($count, 5, '0', STR_PAD_LEFT);
+}
+
+/**
+ * Format date for display
+ */
+function formatEventDate($date) {
+    return date('d M Y', strtotime($date));
+}
+
+/**
+ * Get event dates with labels for display
+ */
+function getEventDatesWithLabels() {
+    $dates = EVENT_DATES;
+    $result = [];
+    
+    foreach ($dates as $date) {
+        $result[] = [
+            'value' => $date,
+            'day' => date('d', strtotime($date)),
+            'month' => date('F', strtotime($date)),
+            'year' => date('Y', strtotime($date)),
+            'label' => date('d F Y', strtotime($date)),
+            'short_label' => date('d M', strtotime($date))
+        ];
+    }
+    
+    return $result;
+}
+
+/**
+ * Check if date is an event date
+ */
+function isEventDate($date) {
+    return in_array($date, EVENT_DATES);
+}
+
+/**
+ * Get or update setting
+ */
+function getSetting($conn, $key, $default = null) {
+    $key = mysqli_real_escape_string($conn, $key);
+    $query = "SELECT setting_value FROM settings WHERE setting_key = '$key'";
+    $result = mysqli_query($conn, $query);
+    
+    if ($result && mysqli_num_rows($result) > 0) {
+        $row = mysqli_fetch_assoc($result);
+        return $row['setting_value'];
+    }
+    
+    return $default;
+}
+
+function updateSetting($conn, $key, $value) {
+    $key = mysqli_real_escape_string($conn, $key);
+    $value = mysqli_real_escape_string($conn, $value);
+    
+    $query = "INSERT INTO settings (setting_key, setting_value, updated_at) 
+              VALUES ('$key', '$value', NOW()) 
+              ON DUPLICATE KEY UPDATE 
+              setting_value = '$value', updated_at = NOW()";
+    
+    return mysqli_query($conn, $query);
+}
+
+/**
+ * Validate uploaded file
+ */
+function validateUploadedFile($file, $type = 'image') {
+    $allowed_types = ($type === 'image') ? ALLOWED_IMAGE_TYPES : ALLOWED_VIDEO_TYPES;
+    $max_size = ($type === 'image') ? MAX_IMAGE_SIZE : MAX_VIDEO_SIZE;
+    
+    if (!isset($file['tmp_name']) || !is_uploaded_file($file['tmp_name'])) {
+        return ['success' => false, 'error' => 'No file uploaded'];
+    }
+    
+    if ($file['size'] > $max_size) {
+        $max_mb = round($max_size / (1024 * 1024), 1);
+        return ['success' => false, 'error' => "File too large. Maximum {$max_mb}MB allowed"];
+    }
+    
+    $file_ext = strtolower(pathinfo($file['name'], PATHINFO_EXTENSION));
+    if (!in_array($file_ext, $allowed_types)) {
+        return ['success' => false, 'error' => 'Invalid file type. Allowed: ' . implode(', ', $allowed_types)];
+    }
+    
+    return ['success' => true, 'extension' => $file_ext];
+}
+
+/**
+ * Save uploaded file
+ */
+function saveUploadedFile($file, $destination_dir, $new_filename = null) {
+    $validation = validateUploadedFile($file, strpos($file['type'], 'video') !== false ? 'video' : 'image');
+    
+    if (!$validation['success']) {
+        return $validation;
+    }
+    
+    if (!file_exists($destination_dir)) {
+        mkdir($destination_dir, 0755, true);
+    }
+    
+    $filename = $new_filename ?? (uniqid() . '.' . $validation['extension']);
+    $destination = $destination_dir . $filename;
+    
+    if (move_uploaded_file($file['tmp_name'], $destination)) {
+        return ['success' => true, 'filename' => $filename, 'path' => $destination];
+    }
+    
+    return ['success' => false, 'error' => 'Failed to save file'];
+}
+
+/**
+ * Ensure upload directories exist
+ */
+function ensureUploadDirectories() {
+    $directories = [
+        UPLOAD_DIR,
+        SLIDER_UPLOAD_DIR . 'desktop/',
+        SLIDER_UPLOAD_DIR . 'mobile/',
+        LOGO_UPLOAD_DIR . 'title/',
+        LOGO_UPLOAD_DIR . 'powered_by/',
+        LOGO_UPLOAD_DIR . 'official_partner/',
+        LOGO_UPLOAD_DIR . 'supported_by/',
+        LOGO_UPLOAD_DIR . 'association/',
+        LOGO_UPLOAD_DIR . 'partners/'
+    ];
+    
+    foreach ($directories as $dir) {
+        if (!file_exists($dir)) {
+            mkdir($dir, 0755, true);
         }
     }
-    $success = "Settings updated successfully!";
+}
+
+/**
+ * Get active sliders
+ */
+function getActiveSliders($conn) {
+    $query = "SELECT * FROM sliders WHERE is_active = 1 ORDER BY display_order ASC";
+    $result = mysqli_query($conn, $query);
+    $sliders = [];
     
-    // Reload settings
-    header("Location: settings.php?success=1");
-    exit();
+    if ($result) {
+        while ($row = mysqli_fetch_assoc($result)) {
+            $sliders[] = $row;
+        }
+    }
+    
+    return $sliders;
 }
 
-// Get all settings
-$sql = "SELECT * FROM settings ORDER BY id";
-$result = mysqli_query($conn, $sql);
-$settings = array();
-while ($row = mysqli_fetch_assoc($result)) {
-    $settings[$row['setting_key']] = $row['setting_value'];
+/**
+ * Get sponsor logos by category
+ */
+function getSponsorLogos($conn, $category = null) {
+    if ($category) {
+        $category = mysqli_real_escape_string($conn, $category);
+        $query = "SELECT * FROM sponsor_logos WHERE category = '$category' AND is_active = 1 ORDER BY display_order ASC";
+    } else {
+        $query = "SELECT * FROM sponsor_logos WHERE is_active = 1 ORDER BY category, display_order ASC";
+    }
+    
+    $result = mysqli_query($conn, $query);
+    $logos = [];
+    
+    if ($result) {
+        while ($row = mysqli_fetch_assoc($result)) {
+            if ($category) {
+                $logos[] = $row;
+            } else {
+                $logos[$row['category']][] = $row;
+            }
+        }
+    }
+    
+    return $logos;
 }
+
+/**
+ * Get minute updates for a specific date
+ */
+function getMinuteUpdates($conn, $date = null) {
+    if (!$date) {
+        $date = date('Y-m-d');
+    }
+    
+    $date = mysqli_real_escape_string($conn, $date);
+    $query = "SELECT * FROM minute_updates 
+              WHERE update_date = '$date' AND is_active = 1 
+              ORDER BY update_time DESC";
+    
+    $result = mysqli_query($conn, $query);
+    $updates = [];
+    
+    if ($result) {
+        while ($row = mysqli_fetch_assoc($result)) {
+            $updates[] = $row;
+        }
+    }
+    
+    return $updates;
+}
+
+// Initialize upload directories
+ensureUploadDirectories();
 ?>
-<!DOCTYPE html>
-<html lang="en">
-<head>
-    <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>System Settings</title>
-    <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.1.3/dist/css/bootstrap.min.css" rel="stylesheet">
-    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/bootstrap-icons@1.7.2/font/bootstrap-icons.css">
-</head>
-<body>
-    <!-- Navigation -->
-    <nav class="navbar navbar-dark bg-dark">
-        <div class="container-fluid">
-            <span class="navbar-brand">System Settings</span>
-            <div class="d-flex">
-                <a href="index.php" class="btn btn-outline-light me-2">Dashboard</a>
-                <a href="attendees.php" class="btn btn-outline-light me-2">Attendees</a>
-                <a href="logout.php" class="btn btn-outline-danger">Logout</a>
-            </div>
-        </div>
-    </nav>
-
-    <div class="container mt-4">
-        <?php if (isset($_GET['success'])): ?>
-            <div class="alert alert-success alert-dismissible fade show">
-                <i class="bi bi-check-circle"></i> Settings updated successfully!
-                <button type="button" class="btn-close" data-bs-dismiss="alert"></button>
-            </div>
-        <?php endif; ?>
-
-        <form method="POST">
-            <div class="row">
-                <!-- General Settings -->
-                <div class="col-md-6">
-                    <div class="card mb-4">
-                        <div class="card-header bg-primary text-white">
-                            <h5 class="mb-0"><i class="bi bi-gear"></i> General Settings</h5>
-                        </div>
-                        <div class="card-body">
-                            <div class="mb-3">
-                                <label class="form-label">Site URL</label>
-                                <input type="url" name="site_url" class="form-control" 
-                                       value="<?php echo $settings['site_url'] ?? ''; ?>" required>
-                            </div>
-                            
-                            <div class="mb-3">
-                                <label class="form-label">Event Name</label>
-                                <input type="text" name="event_name" class="form-control" 
-                                       value="<?php echo $settings['event_name'] ?? ''; ?>" required>
-                            </div>
-                            
-                            <div class="mb-3">
-                                <label class="form-label">Event Date</label>
-                                <input type="date" name="event_date" class="form-control" 
-                                       value="<?php echo $settings['event_date'] ?? ''; ?>">
-                            </div>
-                            
-                            <div class="mb-3">
-                                <label class="form-label">Event Time</label>
-                                <input type="text" name="event_time" class="form-control" 
-                                       value="<?php echo $settings['event_time'] ?? '9:00 AM - 6:00 PM'; ?>">
-                            </div>
-                            
-                            <div class="mb-3">
-                                <label class="form-label">Event Venue</label>
-                                <input type="text" name="event_venue" class="form-control" 
-                                       value="<?php echo $settings['event_venue'] ?? ''; ?>">
-                            </div>
-                            
-                            <div class="mb-3">
-                                <label class="form-label">Timezone</label>
-                                <select name="timezone" class="form-select">
-                                    <option value="Asia/Kolkata" <?php echo ($settings['timezone'] ?? '') == 'Asia/Kolkata' ? 'selected' : ''; ?>>Asia/Kolkata (IST)</option>
-                                    <option value="UTC" <?php echo ($settings['timezone'] ?? '') == 'UTC' ? 'selected' : ''; ?>>UTC</option>
-                                </select>
-                            </div>
-                            
-                            <div class="mb-3">
-                                <label class="form-label">Ticket Price (₹)</label>
-                                <input type="number" name="ticket_price" class="form-control" 
-                                       value="<?php echo $settings['ticket_price'] ?? '500'; ?>">
-                            </div>
-                            
-                            <div class="mb-3">
-                                <label class="form-label">Max Additional Attendees</label>
-                                <input type="number" name="max_attendees_per_registration" class="form-control" 
-                                       value="<?php echo $settings['max_attendees_per_registration'] ?? '5'; ?>" min="0" max="10">
-                            </div>
-                            
-                            <div class="mb-3">
-                                <label class="form-label">Registration Status</label>
-                                <select name="registration_open" class="form-select">
-                                    <option value="1" <?php echo ($settings['registration_open'] ?? '1') == '1' ? 'selected' : ''; ?>>Open</option>
-                                    <option value="0" <?php echo ($settings['registration_open'] ?? '1') == '0' ? 'selected' : ''; ?>>Closed</option>
-                                </select>
-                            </div>
-                        </div>
-                    </div>
-                </div>
-
-                <!-- Payment Settings -->
-                <div class="col-md-6">
-                    <div class="card mb-4">
-                        <div class="card-header bg-success text-white">
-                            <h5 class="mb-0"><i class="bi bi-credit-card"></i> Payment Settings (Razorpay)</h5>
-                        </div>
-                        <div class="card-body">
-                            <div class="mb-3">
-                                <label class="form-label">Razorpay Key ID</label>
-                                <input type="text" name="razorpay_key" class="form-control" 
-                                       value="<?php echo $settings['razorpay_key'] ?? ''; ?>" 
-                                       placeholder="rzp_test_XXXXXXXXXXXXX">
-                                <small class="text-muted">Get from Razorpay Dashboard → Settings → API Keys</small>
-                            </div>
-                            
-                            <div class="mb-3">
-                                <label class="form-label">Razorpay Secret Key</label>
-                                <input type="password" name="razorpay_secret" class="form-control" 
-                                       value="<?php echo $settings['razorpay_secret'] ?? ''; ?>" 
-                                       placeholder="Your secret key">
-                                <small class="text-muted">Keep this secret and secure!</small>
-                            </div>
-                            
-                            <div class="mb-3">
-                                <label class="form-label">Webhook Secret (Optional)</label>
-                                <input type="password" name="webhook_secret" class="form-control" 
-                                       value="<?php echo $settings['webhook_secret'] ?? ''; ?>" 
-                                       placeholder="Webhook secret">
-                                <small class="text-muted">For webhook verification</small>
-                            </div>
-                        </div>
-                    </div>
-
-                    <!-- Email Settings -->
-                    <div class="card mb-4">
-                        <div class="card-header bg-info text-white">
-                            <h5 class="mb-0"><i class="bi bi-envelope"></i> Email Settings</h5>
-                        </div>
-                        <div class="card-body">
-                            <div class="mb-3">
-                                <label class="form-label">SMTP Host</label>
-                                <input type="text" name="smtp_host" class="form-control" 
-                                       value="<?php echo $settings['smtp_host'] ?? 'smtp.gmail.com'; ?>">
-                            </div>
-                            
-                            <div class="mb-3">
-                                <label class="form-label">SMTP Port</label>
-                                <input type="text" name="smtp_port" class="form-control" 
-                                       value="<?php echo $settings['smtp_port'] ?? '587'; ?>">
-                            </div>
-                            
-                            <div class="mb-3">
-                                <label class="form-label">SMTP Username (Email)</label>
-                                <input type="email" name="smtp_user" class="form-control" 
-                                       value="<?php echo $settings['smtp_user'] ?? ''; ?>" 
-                                       placeholder="your_email@gmail.com">
-                            </div>
-                            
-                            <div class="mb-3">
-                                <label class="form-label">SMTP Password / App Password</label>
-                                <input type="password" name="smtp_password" class="form-control" 
-                                       value="<?php echo $settings['smtp_password'] ?? ''; ?>" 
-                                       placeholder="Your app password">
-                                <small class="text-muted">For Gmail, use App Password (not regular password)</small>
-                            </div>
-                            
-                            <div class="mb-3">
-                                <label class="form-label">From Email</label>
-                                <input type="email" name="email_from" class="form-control" 
-                                       value="<?php echo $settings['email_from'] ?? ''; ?>" 
-                                       placeholder="noreply@yourdomain.com">
-                            </div>
-                            
-                            <div class="mb-3">
-                                <label class="form-label">From Name</label>
-                                <input type="text" name="email_from_name" class="form-control" 
-                                       value="<?php echo $settings['email_from_name'] ?? 'Event Registration'; ?>">
-                            </div>
-                            
-                            <div class="mb-3">
-                                <label class="form-label">Admin Email (for notifications)</label>
-                                <input type="email" name="admin_email" class="form-control" 
-                                       value="<?php echo $settings['admin_email'] ?? ''; ?>">
-                            </div>
-                        </div>
-                    </div>
-                </div>
-            </div>
-
-            <div class="text-center mb-4">
-                <button type="submit" name="submit" class="btn btn-primary btn-lg">
-                    <i class="bi bi-save"></i> Save All Settings
-                </button>
-                <a href="index.php" class="btn btn-secondary btn-lg">Cancel</a>
-            </div>
-        </form>
-
-        <!-- Test Section -->
-        <div class="card">
-            <div class="card-header bg-warning">
-                <h5 class="mb-0"><i class="bi bi-bug"></i> Test Settings</h5>
-            </div>
-            <div class="card-body">
-                <div class="row">
-                    <div class="col-md-4">
-                        <button class="btn btn-outline-primary w-100" onclick="testRazorpay()">
-                            Test Razorpay Connection
-                        </button>
-                    </div>
-                    <div class="col-md-4">
-                        <button class="btn btn-outline-info w-100" onclick="testEmail()">
-                            Send Test Email
-                        </button>
-                    </div>
-                    <div class="col-md-4">
-                        <a href="../test-panel.php" class="btn btn-outline-warning w-100">
-                            Open Test Panel
-                        </a>
-                    </div>
-                </div>
-                <div id="test-result" class="mt-3"></div>
-            </div>
-        </div>
-    </div>
-
-    <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.1.3/dist/js/bootstrap.bundle.min.js"></script>
-    <script>
-    function testRazorpay() {
-        document.getElementById('test-result').innerHTML = '<div class="alert alert-info">Testing Razorpay connection...</div>';
-        // Add actual test logic here
-        setTimeout(() => {
-            document.getElementById('test-result').innerHTML = '<div class="alert alert-success">Razorpay test completed!</div>';
-        }, 2000);
-    }
-
-    function testEmail() {
-        document.getElementById('test-result').innerHTML = '<div class="alert alert-info">Sending test email...</div>';
-        
-        fetch('../api/test_email.php')
-            .then(response => response.json())
-            .then(data => {
-                if (data.success) {
-                    document.getElementById('test-result').innerHTML = '<div class="alert alert-success">Test email sent successfully!</div>';
-                } else {
-                    document.getElementById('test-result').innerHTML = '<div class="alert alert-danger">Email test failed: ' + data.message + '</div>';
-                }
-            })
-            .catch(error => {
-                document.getElementById('test-result').innerHTML = '<div class="alert alert-danger">Error: ' + error + '</div>';
-            });
-    }
-    </script>
-</body>
-</html>
