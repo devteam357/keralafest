@@ -1,0 +1,44 @@
+2025-09-30 15:26:36 - Registration request received: Array
+(
+    [name] => Test User 1759226181
+    [email] => test1759226181@example.com
+    [phone] => 9876543210
+    [additional_count] => 0
+    [amount] => 200
+)
+
+2025-09-30 15:26:36 - Registration created successfully: ID=21, UniqueID=REG202509300006
+2025-09-30 15:26:36 - Session data stored: Array
+(
+    [id] => 21
+    [unique_id] => REG202509300006
+    [name] => Test User 1759226181
+    [email] => test1759226181@example.com
+    [phone] => 9876543210
+    [amount] => 200
+    [attendees] => 1
+)
+
+2025-09-30 15:26:36 - Redirecting to payment with session data
+2025-09-30 15:29:36 - Registration request received: Array
+(
+    [name] => Test User
+    [email] => test@example.com
+    [phone] => 9876543210
+    [additional_count] => 0
+    [amount] => 10
+)
+
+2025-09-30 15:29:36 - Registration created successfully: ID=22, UniqueID=REG202509300007
+2025-09-30 15:29:36 - Session data stored: Array
+(
+    [id] => 22
+    [unique_id] => REG202509300007
+    [name] => Test User
+    [email] => test@example.com
+    [phone] => 9876543210
+    [amount] => 10
+    [attendees] => 1
+)
+
+2025-09-30 15:29:36 - Redirecting to payment with session data
